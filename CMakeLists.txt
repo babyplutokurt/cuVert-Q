@@ -1,228 +1,161 @@
-cmake_minimum_required(VERSION 3.10)
-project(FastQIndexing LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.24)
 
-# Enable C++17
+# ============================================================
+# CUDA Toolkit Configuration
+# Usage: -DCUDA_TOOLKIT_PATH=/usr/local/cuda-12.8
+# ============================================================
+set(CUDA_TOOLKIT_PATH "" CACHE PATH "Path to CUDA Toolkit (e.g. /usr/local/cuda-12.8)")
+
+if(CUDA_TOOLKIT_PATH)
+    set(CMAKE_CUDA_COMPILER "${CUDA_TOOLKIT_PATH}/bin/nvcc")
+    set(CUDAToolkit_ROOT "${CUDA_TOOLKIT_PATH}")
+endif()
+
+project(GPUFastQ VERSION 0.1.0 LANGUAGES C CXX CUDA)
+
+# GPU architecture
+set(CMAKE_CUDA_ARCHITECTURES 120)
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-# Find CUDA using the legacy FindCUDA module
-find_package(CUDA REQUIRED)
-
-
-# Include CUDA and project directories
-include_directories(${CUDA_INCLUDE_DIRS})
-include_directories(src/utils include portable psz codec/hf/include)
-
-
-###############################################################################
-# 1) Build the "huffman-test" executable (moved from codec/hf/src/test.cu)
-###############################################################################
-set(PSZ_BACKEND "CUDA" CACHE STRING "Select the desired backend: CUDA/cuda, HIP/hip and ONEAPI/1api.")
-
-cmake_minimum_required(VERSION 3.18)
-project(CUSZ LANGUAGES CUDA CXX C VERSION 0.10.0)
-
-# general cmake setup
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
-option(BUILD_SHARED_LIBS "prefer shared libaries" ON)
-
-message("[psz::info] CUDA backend has been selected.")
-add_compile_definitions(PSZ_USE_CUDA)
-add_compile_definitions(_PORTABLE_USE_CUDA)
+set(CMAKE_CUDA_STANDARD 17)
+set(CMAKE_CUDA_STANDARD_REQUIRED ON)
 
 find_package(CUDAToolkit REQUIRED)
+find_package(OpenMP REQUIRED)
+# ============================================================
+# nvcomp Configuration
+# Usage: -DNVCOMP_ROOT=/path/to/nvcomp
+# Auto-detects from pip if not specified
+# ============================================================
+set(NVCOMP_ROOT "" CACHE PATH "Path to nvcomp installation root")
 
-include(GNUInstallDirs)
+if(NOT NVCOMP_ROOT)
+    # Try python3 first, then python
+    foreach(_python_cmd python3 python)
+        execute_process(
+            COMMAND ${_python_cmd} -c "import nvidia.libnvcomp; import os; print(os.path.dirname(nvidia.libnvcomp.__file__))"
+            OUTPUT_VARIABLE NVCOMP_ROOT
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+            RESULT_VARIABLE _python_result
+        )
+        if(_python_result EQUAL 0 AND NVCOMP_ROOT)
+            break()
+        endif()
+    endforeach()
+endif()
 
-configure_file(${CMAKE_CURRENT_SOURCE_DIR}/psz/src/cusz_version.h.in
-        ${CMAKE_CURRENT_BINARY_DIR}/psz/include/cusz_version.h)
+# Fallback: scan common conda/pip site-packages locations
+if(NOT NVCOMP_ROOT)
+    file(GLOB _nvcomp_candidates
+        "$ENV{HOME}/miniconda3/lib/python*/site-packages/nvidia/libnvcomp"
+        "$ENV{HOME}/anaconda3/lib/python*/site-packages/nvidia/libnvcomp"
+        "$ENV{CONDA_PREFIX}/lib/python*/site-packages/nvidia/libnvcomp"
+    )
+    list(LENGTH _nvcomp_candidates _num_candidates)
+    if(_num_candidates GREATER 0)
+        list(GET _nvcomp_candidates 0 NVCOMP_ROOT)
+    endif()
+endif()
 
-add_library(psz_cu_compile_settings INTERFACE)
-add_library(CUSZ::compile_settings ALIAS psz_cu_compile_settings)
+if(NOT NVCOMP_ROOT)
+    message(FATAL_ERROR "nvcomp not found. Set -DNVCOMP_ROOT=<path> or pip install nvidia-libnvcomp-cu12")
+endif()
 
-target_compile_definitions(
-        psz_cu_compile_settings
-        INTERFACE $<$<COMPILE_LANG_AND_ID:CUDA,Clang>:__STRICT_ANSI__>)
-target_compile_options(
-        psz_cu_compile_settings
-        INTERFACE $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--extended-lambda
-        --expt-relaxed-constexpr -Wno-deprecated-declarations>)
-target_compile_features(psz_cu_compile_settings INTERFACE cxx_std_17 cuda_std_17)
+message(STATUS "nvcomp root: ${NVCOMP_ROOT}")
 
-target_include_directories(
-        psz_cu_compile_settings
-        INTERFACE
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/portable/include/>
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/psz/src/>
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/psz/include/>
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/codec/hf/include/>
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/codec/hf/src/>
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/codec/fzg/include>
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/codec/fzg/src>
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}/include/>
-        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/cusz>
+set(NVCOMP_INCLUDE_DIR "${NVCOMP_ROOT}/include")
+set(NVCOMP_LIB_DIR "${NVCOMP_ROOT}/lib64")
+
+if(NOT EXISTS "${NVCOMP_INCLUDE_DIR}/nvcomp.h")
+    message(FATAL_ERROR "nvcomp headers not found at ${NVCOMP_INCLUDE_DIR}")
+endif()
+
+# Create imported target for nvcomp
+add_library(nvcomp SHARED IMPORTED)
+set_target_properties(nvcomp PROPERTIES
+    IMPORTED_LOCATION "${NVCOMP_LIB_DIR}/libnvcomp.so.5"
+    INTERFACE_INCLUDE_DIRECTORIES "${NVCOMP_INCLUDE_DIR}"
 )
 
-add_library(psz_cu_stat
-        psz/src/stat/compare.stl.cc
-        psz/src/stat/identical/all.cu
-        psz/src/stat/extrema/f4.cu
-        psz/src/stat/extrema/f8.cu
-        psz/src/stat/calcerr/f4.cu
-        psz/src/stat/calcerr/f8.cu
-        psz/src/stat/assess/f4.cu
-        psz/src/stat/assess/f8.cu
-        psz/src/stat/maxerr/max_err.cu
-)
-target_link_libraries(psz_cu_stat
-        PUBLIC
-        psz_cu_compile_settings
-)
-add_library(CUSZ::stat ALIAS psz_cu_stat)
-
-add_library(psz_cu_mem
-        portable/src/mem/memobj.f.cc
-        portable/src/mem/memobj.i.cc
-        portable/src/mem/memobj.u.cc
-        portable/src/mem/memobj.misc.cc)
-target_link_libraries(psz_cu_mem
-        PUBLIC
-        psz_cu_compile_settings
-        psz_cu_stat
-        CUDA::cudart
-)
-add_library(CUSZ::mem ALIAS psz_cu_mem)
-
-add_library(psz_cu_utils
-        psz/src/utils/viewer.cc
-        psz/src/utils/viewer.cu
-        psz/src/utils/verinfo.cc
-        psz/src/utils/verinfo.cu
-        psz/src/utils/verinfo_nv.cu
-        psz/src/utils/vis_stat.cc
-        psz/src/utils/context.cc
-        psz/src/utils/header.c
-)
-target_link_libraries(psz_cu_utils
-        PUBLIC
-        psz_cu_compile_settings
-        CUDA::cudart CUDA::nvml
-)
-add_library(CUSZ::utils ALIAS psz_cu_utils)
-
-add_library(psz_cu_phf
-        codec/hf/src/hfclass.cc
-        codec/hf/src/hf_est.cc
-        codec/hf/src/hfbk_impl1.seq.cc
-        codec/hf/src/hfbk_impl2.seq.cc
-        codec/hf/src/hfbk_internal.seq.cc
-        codec/hf/src/hfbk.seq.cc
-        codec/hf/src/hfcanon.seq.cc
-        codec/hf/src/hfcxx_module.cu
-        codec/hf/src/libphf.cc
-)
-target_link_libraries(psz_cu_phf
-        PUBLIC
-        psz_cu_compile_settings
-        psz_cu_stat
-        CUDA::cuda_driver
-)
-add_library(CUSZ::phf ALIAS psz_cu_phf)
-
-# Define the huffman-test executable
-add_executable(huffman-test src/test.cu)
-
-# Link against necessary libraries
-target_link_libraries(huffman-test PRIVATE
-        psz_cu_compile_settings
-        CUSZ::phf
-        CUSZ::stat
-        CUSZ::mem
-        CUSZ::utils
-        CUDA::cudart
+# ============================================================
+# GPUFastQ Library
+# ============================================================
+add_library(gpufastq_lib
+    src/codec_bsc.cpp
+    src/codec_gpu.cu
+    src/codec_gpu_nvcomp.cu
+    src/compression_workflow.cpp
+    src/decompression_workflow.cpp
+    src/fastq_parser.cpp
+    src/gpu_compressor.cu
+    src/serializer.cpp
 )
 
-# Set C++ and CUDA standards
-target_compile_features(huffman-test PRIVATE cxx_std_17 cuda_std_17)
+set(BSC_ENABLE_CUDA ON CACHE BOOL "Enable libbsc CUDA support in submodule build" FORCE)
+set(BSC_ENABLE_OPENMP ON CACHE BOOL "Enable libbsc OpenMP support in submodule build" FORCE)
+set(BSC_BUILD_SHARED_LIB OFF CACHE BOOL "Build libbsc as a static library" FORCE)
+add_subdirectory(deps/libbsc deps/libbsc-build EXCLUDE_FROM_ALL)
 
-# Enable CUDA separable compilation if required
-set_target_properties(huffman-test PROPERTIES CUDA_SEPARABLE_COMPILATION ON)
-
-# Apply CUDA-specific compile options
-target_compile_options(huffman-test PRIVATE
-        $<$<COMPILE_LANG_AND_ID:CUDA,NVIDIA>:--extended-lambda
-        --expt-relaxed-constexpr -Wno-deprecated-declarations>
+set(PROJECT_RUNTIME_RPATH
+    "${NVCOMP_LIB_DIR}"
+    "/usr/local/lib"
+    "$<TARGET_FILE_DIR:CUDA::cudart>"
 )
 
-# Explicitly add include directories to ensure headers are found
-target_include_directories(huffman-test PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/codec/hf/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/psz/include
+if(OpenMP_gomp_LIBRARY)
+    get_filename_component(OPENMP_RUNTIME_DIR "${OpenMP_gomp_LIBRARY}" DIRECTORY)
+    list(APPEND PROJECT_RUNTIME_RPATH "${OPENMP_RUNTIME_DIR}")
+endif()
+
+list(REMOVE_DUPLICATES PROJECT_RUNTIME_RPATH)
+
+target_include_directories(gpufastq_lib PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/deps/libbsc
 )
 
-# Install the huffman-test executable
-install(TARGETS huffman-test
-        RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+target_link_libraries(gpufastq_lib PUBLIC
+    nvcomp
+    CUDA::cudart
+    bsc::libbsc
 )
 
-# Install headers for Huffman
-install(DIRECTORY
-        portable/include/
-        psz/include/
-        codec/hf/include/
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cusz
-)
-install(FILES
-        ${CMAKE_CURRENT_BINARY_DIR}/psz/include/cusz_version.h
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/cusz/)
-
-
-
-###############################################################################
-# 2) Build the "main_index" executable from main_indexing.cpp
-###############################################################################
-cuda_add_executable(main_index
-        src/main_indexing.cpp
-        src/indexing.cu
-        src/utils/file_utils.cpp
-)
-target_link_libraries(main_index ${CUDA_LIBRARIES})
-
-###############################################################################
-# 3) Build the original "main" executable (CUDA + C++ source files)
-###############################################################################
-cuda_add_executable(main
-        src/main.cu
-        src/indexing.cu
-        src/utils/file_utils.cpp
-        src/rle.cu
-        src/lorenzo.cu
-        src/identifier_processing.cu
-        src/identifier_parser.cu
-        src/identifier_compressor.cu
-        src/gpulz.cu
-        src/basecall_compress.cu
-        src/quality_scores_process.cu
+set_target_properties(gpufastq_lib PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON
+    POSITION_INDEPENDENT_CODE ON
 )
 
-target_link_libraries(main
-        ${CUDA_LIBRARIES}
-        psz_cu_compile_settings
-        CUSZ::phf
-        CUSZ::stat
-        CUSZ::mem
-        CUSZ::utils
-        CUDA::cudart
+# ============================================================
+# GPUFastQ Executable
+# ============================================================
+add_executable(cuvertq src/main.cpp)
+target_link_libraries(cuvertq PRIVATE gpufastq_lib)
+
+set_target_properties(cuvertq PROPERTIES
+    BUILD_RPATH "${PROJECT_RUNTIME_RPATH}"
+    INSTALL_RPATH "${PROJECT_RUNTIME_RPATH}"
 )
 
-###############################################################################
-# 4) Build the "main_basecall" executable (CUDA + C++ source files)
-###############################################################################
-cuda_add_executable(main_basecall
-        src/main_basecall.cu
-        src/indexing.cu
-        src/utils/file_utils.cpp
-        src/basecall_compress.cu
+# ============================================================
+# Ablation Executable
+# ============================================================
+add_executable(gpufastq_ablation src/ablation.cpp)
+target_link_libraries(gpufastq_ablation PRIVATE gpufastq_lib)
+
+set_target_properties(gpufastq_ablation PROPERTIES
+    BUILD_RPATH "${PROJECT_RUNTIME_RPATH}"
+    INSTALL_RPATH "${PROJECT_RUNTIME_RPATH}"
 )
-target_link_libraries(main_basecall ${CUDA_LIBRARIES})
+
+# ============================================================
+# Ablation Zstd Executable
+# ============================================================
+add_executable(gpufastq_ablation_zstd src/ablation_zstd.cpp)
+target_link_libraries(gpufastq_ablation_zstd PRIVATE gpufastq_lib)
+
+set_target_properties(gpufastq_ablation_zstd PROPERTIES
+    BUILD_RPATH "${PROJECT_RUNTIME_RPATH}"
+    INSTALL_RPATH "${PROJECT_RUNTIME_RPATH}"
+)
