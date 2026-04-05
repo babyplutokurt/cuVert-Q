@@ -44,7 +44,7 @@ int decompress(const std::string &input_path, const std::string &output_path,
               << "\n";
   }
 
-  deserialize_header(infile);
+  const uint32_t format_version = deserialize_header(infile);
 
   uint64_t total_records = 0;
   long long t_deserialize = 0;
@@ -55,7 +55,7 @@ int decompress(const std::string &input_path, const std::string &output_path,
   while (true) {
     const auto t_chunk_start = clock::now();
     CompressedFastqData compressed;
-    if (!deserialize_chunk(infile, compressed)) {
+    if (!deserialize_chunk(infile, compressed, format_version)) {
       break;
     }
     const auto t_chunk_deserialized = clock::now();

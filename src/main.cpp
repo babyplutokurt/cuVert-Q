@@ -40,6 +40,17 @@ gpufastq::QualityCodec parse_quality_codec_arg(const std::string &value) {
   throw std::runtime_error("--quality-codec must be 'bsc' or 'zstd'");
 }
 
+gpufastq::BasecallPackOrder parse_basecall_pack_order_arg(
+    const std::string &value) {
+  if (value == "tgca") {
+    return gpufastq::BasecallPackOrder::Tgca;
+  }
+  if (value == "acgt") {
+    return gpufastq::BasecallPackOrder::Acgt;
+  }
+  throw std::runtime_error("--base-pack-order must be 'tgca' or 'acgt'");
+}
+
 } // namespace
 
 void print_usage(const char *prog) {
@@ -60,6 +71,8 @@ void print_usage(const char *prog) {
          "mode (default: env GPUFASTQ_BSC_GPU_JOBS, else 32)\n"
       << "  --base-bsc         Use libbsc instead of nvcomp for packed "
          "basecall compression (default: off)\n"
+      << "  --base-pack-order O Pack A/C/G/T as tgca or acgt "
+         "(default: tgca)\n"
       << "  --transpose        Transpose fixed-length quality scores before "
          "Zstd compression (default: off)\n"
       << "  --stat             Print detailed timing statistics for each "
@@ -101,6 +114,14 @@ int main(int argc, char *argv[]) {
       }
       if (arg == "--base-bsc") {
         bsc_config.base_bsc = true;
+        continue;
+      }
+      if (arg == "--base-pack-order") {
+        if (argi + 1 >= argc) {
+          throw std::runtime_error("Missing value for " + arg);
+        }
+        bsc_config.basecall_pack_order =
+            parse_basecall_pack_order_arg(argv[++argi]);
         continue;
       }
       if (arg == "--log-stat") {

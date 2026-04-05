@@ -1176,33 +1176,34 @@ __global__ void gather_fields_kernel(
 }
 
 __device__ inline uint8_t encode_basecall_2bit(uint8_t base, bool *is_n,
-                                               bool *is_valid) {
+                                               bool *is_valid,
+                                               BasecallPackOrder pack_order) {
   switch (base) {
   case 'A':
   case 'a':
     *is_n = false;
     *is_valid = true;
-    return 0;
+    return pack_order == BasecallPackOrder::Acgt ? 0 : 3;
   case 'C':
   case 'c':
     *is_n = false;
     *is_valid = true;
-    return 1;
+    return pack_order == BasecallPackOrder::Acgt ? 1 : 2;
   case 'G':
   case 'g':
     *is_n = false;
     *is_valid = true;
-    return 2;
+    return pack_order == BasecallPackOrder::Acgt ? 2 : 1;
   case 'T':
   case 't':
     *is_n = false;
     *is_valid = true;
-    return 3;
+    return pack_order == BasecallPackOrder::Acgt ? 3 : 0;
   case 'N':
   case 'n':
     *is_n = true;
     *is_valid = true;
-    return 0;
+    return pack_order == BasecallPackOrder::Acgt ? 0 : 3;
   default:
     *is_n = false;
     *is_valid = false;
@@ -1213,7 +1214,8 @@ __device__ inline uint8_t encode_basecall_2bit(uint8_t base, bool *is_n,
 __global__ void count_n_basecalls_kernel(const uint8_t *basecalls,
                                          uint64_t basecall_count,
                                          uint32_t *n_counts,
-                                         uint64_t *invalid_position) {
+                                         uint64_t *invalid_position,
+                                         BasecallPackOrder pack_order) {
   const uint64_t block_index = blockIdx.x;
   const uint64_t block_start =
       block_index * static_cast<uint64_t>(BASECALL_N_BLOCK_SIZE);
@@ -1235,7 +1237,7 @@ __global__ void count_n_basecalls_kernel(const uint8_t *basecalls,
        index += blockDim.x) {
     bool is_n = false;
     bool is_valid = false;
-    encode_basecall_2bit(basecalls[index], &is_n, &is_valid);
+    encode_basecall_2bit(basecalls[index], &is_n, &is_valid, pack_order);
     if (!is_valid) {
       atomicMin(reinterpret_cast<unsigned long long *>(invalid_position),
                 static_cast<unsigned long long>(index));
@@ -1259,7 +1261,8 @@ __global__ void count_n_basecalls_kernel(const uint8_t *basecalls,
 __global__ void pack_basecalls_2bit_kernel(const uint8_t *basecalls,
                                            uint64_t basecall_count,
                                            uint8_t *packed_bases,
-                                           uint64_t *invalid_position) {
+                                           uint64_t *invalid_position,
+                                           BasecallPackOrder pack_order) {
   const uint64_t packed_index = blockIdx.x * blockDim.x + threadIdx.x;
   const uint64_t base_index = packed_index * 4;
   if (base_index >= basecall_count) {
@@ -1276,7 +1279,7 @@ __global__ void pack_basecalls_2bit_kernel(const uint8_t *basecalls,
     bool is_n = false;
     bool is_valid = false;
     const uint8_t code =
-        encode_basecall_2bit(basecalls[index], &is_n, &is_valid);
+        encode_basecall_2bit(basecalls[index], &is_n, &is_valid, pack_order);
     if (!is_valid) {
       atomicMin(reinterpret_cast<unsigned long long *>(invalid_position),
                 static_cast<unsigned long long>(index));
@@ -1291,7 +1294,8 @@ __global__ void scatter_n_positions_kernel(const uint8_t *basecalls,
                                            uint64_t basecall_count,
                                            const uint64_t *n_offsets,
                                            uint16_t *n_positions,
-                                           uint64_t *invalid_position) {
+                                           uint64_t *invalid_position,
+                                           BasecallPackOrder pack_order) {
   const uint64_t block_index = blockIdx.x;
   const uint64_t block_start =
       block_index * static_cast<uint64_t>(BASECALL_N_BLOCK_SIZE);
@@ -1316,7 +1320,7 @@ __global__ void scatter_n_positions_kernel(const uint8_t *basecalls,
        index += blockDim.x) {
     bool is_n = false;
     bool is_valid = false;
-    encode_basecall_2bit(basecalls[index], &is_n, &is_valid);
+    encode_basecall_2bit(basecalls[index], &is_n, &is_valid, pack_order);
     if (!is_valid) {
       atomicMin(reinterpret_cast<unsigned long long *>(invalid_position),
                 static_cast<unsigned long long>(index));
@@ -1588,6 +1592,7 @@ compress_basecalls_device(const uint8_t *d_basecalls, uint64_t basecall_count,
   result.original_size = basecall_count;
   result.n_block_size = BASECALL_N_BLOCK_SIZE;
   result.packed_codec = BasecallPackedCodec::Zstd;
+  result.pack_order = bsc_config.basecall_pack_order;
   if (basecall_count == 0) {
     return result;
   }
@@ -1613,7 +1618,8 @@ compress_basecalls_device(const uint8_t *d_basecalls, uint64_t basecall_count,
     const uint32_t kernel_block_size = 256;
     count_n_basecalls_kernel<<<static_cast<uint32_t>(block_count),
                                kernel_block_size, 0, stream>>>(
-        d_basecalls, basecall_count, encoded.n_counts, d_invalid_position);
+        d_basecalls, basecall_count, encoded.n_counts, d_invalid_position,
+        bsc_config.basecall_pack_order);
     CUDA_CHECK(cudaGetLastError());
 
     thrust::exclusive_scan(thrust::cuda::par.on(stream),
@@ -1631,7 +1637,8 @@ compress_basecalls_device(const uint8_t *d_basecalls, uint64_t basecall_count,
         (packed_size + kernel_block_size - 1) / kernel_block_size);
     pack_basecalls_2bit_kernel<<<pack_grid_size, kernel_block_size, 0,
                                  stream>>>(
-        d_basecalls, basecall_count, encoded.packed_bases, d_invalid_position);
+        d_basecalls, basecall_count, encoded.packed_bases, d_invalid_position,
+        bsc_config.basecall_pack_order);
     CUDA_CHECK(cudaGetLastError());
 
     CUDA_CHECK(cudaStreamSynchronize(stream));
@@ -1667,7 +1674,7 @@ compress_basecalls_device(const uint8_t *d_basecalls, uint64_t basecall_count,
       scatter_n_positions_kernel<<<static_cast<uint32_t>(block_count),
                                    kernel_block_size, 0, stream>>>(
           d_basecalls, basecall_count, encoded.n_offsets, encoded.n_positions,
-          d_invalid_position);
+          d_invalid_position, bsc_config.basecall_pack_order);
       CUDA_CHECK(cudaGetLastError());
       const uint32_t delta_block_size = 256;
       const uint32_t delta_grid_size = static_cast<uint32_t>(
@@ -1772,12 +1779,19 @@ decode_basecalls(const CompressedBasecallData &compressed,
   }
 
   std::vector<uint8_t> basecalls(compressed.original_size);
-  static constexpr uint8_t BASECALL_DECODE_TABLE[4] = {'A', 'C', 'G', 'T'};
+  static constexpr uint8_t BASECALL_DECODE_TABLE_ACGT[4] = {'A', 'C', 'G',
+                                                            'T'};
+  static constexpr uint8_t BASECALL_DECODE_TABLE_TGCA[4] = {'T', 'G', 'C',
+                                                            'A'};
+  const uint8_t *decode_table =
+      compressed.pack_order == BasecallPackOrder::Acgt
+          ? BASECALL_DECODE_TABLE_ACGT
+          : BASECALL_DECODE_TABLE_TGCA;
   for (uint64_t index = 0; index < compressed.original_size; ++index) {
     const uint8_t packed_value = packed_bases[index / 4];
     const uint8_t code =
         static_cast<uint8_t>((packed_value >> (2 * (index % 4))) & 0x3);
-    basecalls[index] = BASECALL_DECODE_TABLE[code];
+    basecalls[index] = decode_table[code];
   }
 
   const auto *n_positions =

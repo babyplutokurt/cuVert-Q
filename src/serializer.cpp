@@ -214,6 +214,11 @@ void validate_basecall_stream(const CompressedBasecallData &data) {
     throw std::runtime_error(
         "Cannot serialize basecall metadata with unknown packed codec");
   }
+  if (data.pack_order != BasecallPackOrder::Tgca &&
+      data.pack_order != BasecallPackOrder::Acgt) {
+    throw std::runtime_error(
+        "Cannot serialize basecall metadata with unknown pack order");
+  }
 
   const uint64_t expected_block_count =
       (data.original_size + data.n_block_size - 1) / data.n_block_size;
@@ -326,6 +331,7 @@ void serialize_chunk(std::ofstream &file, const CompressedFastqData &data) {
   write_val(file, data.basecalls.original_size);
   write_val(file, data.basecalls.n_block_size);
   write_val(file, static_cast<uint8_t>(data.basecalls.packed_codec));
+  write_val(file, static_cast<uint8_t>(data.basecalls.pack_order));
   write_val(file,
             static_cast<uint64_t>(data.basecalls.packed_bases.original_size));
   write_val(file,
@@ -413,28 +419,30 @@ CompressedFastqData deserialize(const std::string &filepath) {
   if (!file.is_open()) {
     throw std::runtime_error("Cannot open input file: " + filepath);
   }
-  deserialize_header(file);
+  const uint32_t format_version = deserialize_header(file);
   CompressedFastqData data;
-  if (!deserialize_chunk(file, data)) {
+  if (!deserialize_chunk(file, data, format_version)) {
     throw std::runtime_error("Expected at least one chunk in file");
   }
   return data;
 }
 
-void deserialize_header(std::ifstream &file) {
+uint32_t deserialize_header(std::ifstream &file) {
   const uint32_t magic = read_val<uint32_t>(file);
   if (magic != MAGIC) {
     throw std::runtime_error("Invalid file format: bad magic number");
   }
 
   const uint32_t version = read_val<uint32_t>(file);
-  if (version != FORMAT_VERSION) {
+  if (version != 16 && version != FORMAT_VERSION) {
     throw std::runtime_error("Unsupported format version: " +
                              std::to_string(version));
   }
+  return version;
 }
 
-bool deserialize_chunk(std::ifstream &file, CompressedFastqData &data) {
+bool deserialize_chunk(std::ifstream &file, CompressedFastqData &data,
+                       uint32_t format_version) {
   if (!read_val_opt(file, data.num_records)) {
     return false;
   }
@@ -454,6 +462,12 @@ bool deserialize_chunk(std::ifstream &file, CompressedFastqData &data) {
   data.basecalls.n_block_size = read_val<uint32_t>(file);
   data.basecalls.packed_codec =
       static_cast<BasecallPackedCodec>(read_val<uint8_t>(file));
+  if (format_version >= 17) {
+    data.basecalls.pack_order =
+        static_cast<BasecallPackOrder>(read_val<uint8_t>(file));
+  } else {
+    data.basecalls.pack_order = BasecallPackOrder::Tgca;
+  }
   data.basecalls.packed_bases.original_size = read_val<uint64_t>(file);
   const uint64_t comp_packed_size = read_val<uint64_t>(file);
   const uint64_t comp_packed_chunks = read_val<uint64_t>(file);

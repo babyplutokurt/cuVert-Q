@@ -21,11 +21,17 @@ enum class BscBackend {
   Cuda,
 };
 
+enum class BasecallPackOrder : uint8_t {
+  Tgca = 0,
+  Acgt = 1,
+};
+
 struct BscConfig {
   QualityCodec quality_codec = QualityCodec::Bsc;
   BscBackend backend = BscBackend::Default;
   size_t threads = 0;
   size_t gpu_jobs = 0;
+  BasecallPackOrder basecall_pack_order = BasecallPackOrder::Tgca;
   bool zstd_transpose_quality = false;
   bool stat_mode = false;
   bool base_bsc = false; // New flag for compressing packed bases with libbsc

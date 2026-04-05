@@ -163,7 +163,7 @@ int roundtrip(const std::string &input_path, const BscConfig &bsc_config) {
 
   // Now verify
   std::ifstream decoded_in(tmp_path, std::ios::binary);
-  deserialize_header(decoded_in);
+  const uint32_t format_version = deserialize_header(decoded_in);
 
   std::ifstream orig_in(input_path, std::ios::binary);
 
@@ -174,7 +174,7 @@ int roundtrip(const std::string &input_path, const BscConfig &bsc_config) {
       break;
 
     CompressedFastqData compressed;
-    if (!deserialize_chunk(decoded_in, compressed)) {
+    if (!deserialize_chunk(decoded_in, compressed, format_version)) {
       std::cerr << "FAIL: Output stream ended prematurely on chunk "
                 << chunk_idx << "\n";
       ok = false;
@@ -202,7 +202,7 @@ int roundtrip(const std::string &input_path, const BscConfig &bsc_config) {
 
   // Ensure decoded_in doesn't have more chunks
   CompressedFastqData dummy;
-  if (ok && deserialize_chunk(decoded_in, dummy)) {
+  if (ok && deserialize_chunk(decoded_in, dummy, format_version)) {
     std::cerr << "FAIL: Output stream has unexpected extra chunks\n";
     ok = false;
   }

@@ -13,7 +13,7 @@ constexpr const char *COMPRESSED_EXTENSION = ".cuvf";
 constexpr uint32_t MAGIC = 0x5A514647;
 
 /// File format version
-constexpr uint32_t FORMAT_VERSION = 16;
+constexpr uint32_t FORMAT_VERSION = 17;
 
 /// Serialize compressed FASTQ data to a binary .cuvf file (single chunk)
 void serialize(const std::string &filepath, const CompressedFastqData &data);
@@ -29,10 +29,11 @@ void serialize_header(std::ofstream &file);
 void serialize_chunk(std::ofstream &file, const CompressedFastqData &data);
 
 /// Deserializes the MAGIC and FORMAT_VERSION headers from the stream.
-void deserialize_header(std::ifstream &file);
+uint32_t deserialize_header(std::ifstream &file);
 
 /// Reads a single CompressedFastqData chunk from the stream. Returns false if
 /// EOF.
-bool deserialize_chunk(std::ifstream &file, CompressedFastqData &data);
+bool deserialize_chunk(std::ifstream &file, CompressedFastqData &data,
+                       uint32_t format_version);
 
 } // namespace gpufastq

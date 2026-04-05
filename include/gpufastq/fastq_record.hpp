@@ -94,6 +94,7 @@ struct CompressedBasecallData {
   uint64_t original_size = 0;
   uint32_t n_block_size = 0;
   BasecallPackedCodec packed_codec = BasecallPackedCodec::Zstd;
+  BasecallPackOrder pack_order = BasecallPackOrder::Tgca;
   ZstdCompressedBlock packed_bases;
   ZstdCompressedBlock n_counts;
   ZstdCompressedBlock n_positions;
