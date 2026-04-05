@@ -109,7 +109,7 @@ size_t resolve_cpu_worker_count(size_t requested_workers, size_t task_count) {
 
 size_t resolve_gpu_job_count(size_t requested_jobs, size_t task_count) {
   return resolve_worker_count(requested_jobs, "GPUFASTQ_BSC_GPU_JOBS",
-                              task_count, 1);
+                              task_count, 32);
 }
 
 size_t resolve_parallelism(const BscConfig &config, size_t task_count,
