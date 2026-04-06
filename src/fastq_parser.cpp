@@ -3,6 +3,7 @@
 
 #include <cctype>
 #include <chrono>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -27,6 +28,22 @@ struct TokenizedIdentifier {
 
 uint64_t line_content_length(const std::vector<uint64_t> &line_offsets,
                              uint64_t line_idx);
+
+bool plus_line_matches_identifier(const FastqData &data, uint64_t record) {
+  const uint64_t id_line = 4 * record;
+  const uint64_t plus_line = id_line + 2;
+  const uint64_t id_len = line_content_length(data.line_offsets, id_line);
+  const uint64_t plus_len = line_content_length(data.line_offsets, plus_line);
+  if (plus_len != id_len) {
+    return false;
+  }
+
+  const uint64_t id_start = data.line_offsets[id_line] + 1;
+  const uint64_t plus_start = data.line_offsets[plus_line] + 1;
+  return std::memcmp(data.raw_bytes.data() + id_start,
+                     data.raw_bytes.data() + plus_start,
+                     static_cast<size_t>(id_len - 1)) == 0;
+}
 
 TokenizedIdentifier tokenize_identifier(const uint8_t *data, size_t size) {
   TokenizedIdentifier out;
@@ -219,9 +236,9 @@ void validate_fastq_layout(const FastqData &data) {
       throw std::runtime_error("Identifier line is empty at record " +
                                std::to_string(record + 1));
     }
-    if (plus_len != 1) {
+    if (plus_len != 1 && !plus_line_matches_identifier(data, record)) {
       throw std::runtime_error(
-          "Only '+' separator lines without comments are supported");
+          "Only bare '+' or '+' followed by the identifier are supported");
     }
     if (seq_len != qual_len) {
       throw std::runtime_error("Sequence/quality length mismatch at record " +

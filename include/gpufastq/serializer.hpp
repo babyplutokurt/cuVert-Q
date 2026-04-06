@@ -13,7 +13,7 @@ constexpr const char *COMPRESSED_EXTENSION = ".cuvf";
 constexpr uint32_t MAGIC = 0x5A514647;
 
 /// File format version
-constexpr uint32_t FORMAT_VERSION = 17;
+constexpr uint32_t FORMAT_VERSION = 18;
 
 /// Serialize compressed FASTQ data to a binary .cuvf file (single chunk)
 void serialize(const std::string &filepath, const CompressedFastqData &data);

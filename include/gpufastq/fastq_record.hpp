@@ -41,6 +41,11 @@ enum class BasecallPackedCodec : uint8_t {
   Bsc = 1,
 };
 
+enum class PlusLineKind : uint8_t {
+  BarePlus = 0,
+  CopyIdentifier = 1,
+};
+
 /// Raw FASTQ bytes plus line-start indices.
 struct FastqData {
   /// Full FASTQ byte stream.
@@ -109,6 +114,7 @@ struct CompressedFastqData {
   CompressedBasecallData basecalls;
   ZstdCompressedBlock quality_scores;
   ZstdCompressedBlock line_lengths;
+  std::vector<uint8_t> plus_line_kinds;
   QualityCodec quality_codec = QualityCodec::Bsc;
   QualityLayoutKind quality_layout = QualityLayoutKind::FixedLength;
   uint32_t fixed_quality_length = 0;

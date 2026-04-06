@@ -256,6 +256,22 @@ void validate_basecall_stream(const CompressedBasecallData &data) {
                           data.compressed_n_position_chunk_sizes, "N-position");
 }
 
+void validate_plus_line_kinds(const CompressedFastqData &data) {
+  if (data.plus_line_kinds.empty()) {
+    return;
+  }
+  if (data.plus_line_kinds.size() != static_cast<size_t>(data.num_records)) {
+    throw std::runtime_error(
+        "Cannot serialize plus-line metadata with inconsistent record count");
+  }
+  for (uint8_t kind : data.plus_line_kinds) {
+    if (kind != static_cast<uint8_t>(PlusLineKind::BarePlus) &&
+        kind != static_cast<uint8_t>(PlusLineKind::CopyIdentifier)) {
+      throw std::runtime_error("Cannot serialize unknown plus-line kind");
+    }
+  }
+}
+
 } // namespace
 
 void serialize_header(std::ofstream &file) {
@@ -310,6 +326,7 @@ void serialize_chunk(std::ofstream &file, const CompressedFastqData &data) {
   validate_chunked_stream(
       data.line_lengths.payload, data.line_lengths.original_size,
       data.compressed_line_length_chunk_sizes, "line-length");
+  validate_plus_line_kinds(data);
 
   write_val(file, data.num_records);
   write_val(file, data.line_offset_count);
@@ -363,6 +380,7 @@ void serialize_chunk(std::ofstream &file, const CompressedFastqData &data) {
   write_val(file, static_cast<uint64_t>(data.line_lengths.payload.size()));
   write_val(file, static_cast<uint64_t>(
                       data.compressed_line_length_chunk_sizes.size()));
+  write_val(file, static_cast<uint64_t>(data.plus_line_kinds.size()));
 
   for (const auto &separator : data.identifiers.layout.separators) {
     write_string(file, separator);
@@ -392,6 +410,9 @@ void serialize_chunk(std::ofstream &file, const CompressedFastqData &data) {
   write_index(file, data.compressed_quality_chunk_sizes);
   write_index(file, data.uncompressed_quality_chunk_sizes);
   write_index(file, data.compressed_line_length_chunk_sizes);
+  for (uint8_t kind : data.plus_line_kinds) {
+    write_val(file, kind);
+  }
 
   write_blob(file, data.identifiers.flat_data.payload);
   for (const auto &column : data.identifiers.columns) {
@@ -434,7 +455,7 @@ uint32_t deserialize_header(std::ifstream &file) {
   }
 
   const uint32_t version = read_val<uint32_t>(file);
-  if (version != 16 && version != FORMAT_VERSION) {
+  if (version != 16 && version != 17 && version != FORMAT_VERSION) {
     throw std::runtime_error("Unsupported format version: " +
                              std::to_string(version));
   }
@@ -489,6 +510,10 @@ bool deserialize_chunk(std::ifstream &file, CompressedFastqData &data,
   data.line_lengths.original_size = read_val<uint64_t>(file);
   const uint64_t comp_index_size = read_val<uint64_t>(file);
   const uint64_t comp_index_chunks = read_val<uint64_t>(file);
+  uint64_t plus_line_kind_count = 0;
+  if (format_version >= 18) {
+    plus_line_kind_count = read_val<uint64_t>(file);
+  }
 
   data.identifiers.layout.separators.reserve(
       static_cast<size_t>(identifier_separator_count));
@@ -537,6 +562,18 @@ bool deserialize_chunk(std::ifstream &file, CompressedFastqData &data,
   data.compressed_quality_chunk_sizes = read_index(file, comp_qual_chunks);
   data.uncompressed_quality_chunk_sizes = read_index(file, comp_qual_chunks);
   data.compressed_line_length_chunk_sizes = read_index(file, comp_index_chunks);
+  data.plus_line_kinds.clear();
+  if (format_version >= 18) {
+    data.plus_line_kinds.reserve(static_cast<size_t>(plus_line_kind_count));
+    for (uint64_t i = 0; i < plus_line_kind_count; ++i) {
+      data.plus_line_kinds.push_back(read_val<uint8_t>(file));
+    }
+  }
+  if (data.plus_line_kinds.empty() && data.num_records != 0) {
+    data.plus_line_kinds.resize(
+        static_cast<size_t>(data.num_records),
+        static_cast<uint8_t>(PlusLineKind::BarePlus));
+  }
 
   data.identifiers.flat_data.payload = read_blob(file, comp_id_size);
   for (size_t i = 0; i < data.identifiers.columns.size(); ++i) {
@@ -556,6 +593,7 @@ bool deserialize_chunk(std::ifstream &file, CompressedFastqData &data,
   validate_chunked_stream(data.quality_scores.payload,
                           data.quality_scores.original_size,
                           data.compressed_quality_chunk_sizes, "quality");
+  validate_plus_line_kinds(data);
   return true;
 }
 

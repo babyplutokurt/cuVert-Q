@@ -191,6 +191,40 @@ uint64_t line_content_length(const std::vector<uint64_t> &line_offsets,
   return line_offsets[line_idx + 1] - line_offsets[line_idx] - 1;
 }
 
+bool plus_line_matches_identifier(const FastqData &data, uint64_t record) {
+  const uint64_t id_line = 4 * record;
+  const uint64_t plus_line = id_line + 2;
+  const uint64_t id_len = line_content_length(data.line_offsets, id_line);
+  const uint64_t plus_len = line_content_length(data.line_offsets, plus_line);
+  if (plus_len != id_len) {
+    return false;
+  }
+
+  const uint64_t id_start = data.line_offsets[id_line] + 1;
+  const uint64_t plus_start = data.line_offsets[plus_line] + 1;
+  return std::memcmp(data.raw_bytes.data() + id_start,
+                     data.raw_bytes.data() + plus_start,
+                     static_cast<size_t>(id_len - 1)) == 0;
+}
+
+std::vector<uint8_t> encode_plus_line_kinds(const FastqData &data) {
+  std::vector<uint8_t> kinds(static_cast<size_t>(data.num_records),
+                             static_cast<uint8_t>(PlusLineKind::BarePlus));
+  for (uint64_t record = 0; record < data.num_records; ++record) {
+    const uint64_t plus_len = line_content_length(data.line_offsets, 4 * record + 2);
+    if (plus_len == 1) {
+      continue;
+    }
+    if (!plus_line_matches_identifier(data, record)) {
+      throw std::runtime_error(
+          "Encountered unsupported '+' line while encoding metadata");
+    }
+    kinds[static_cast<size_t>(record)] =
+        static_cast<uint8_t>(PlusLineKind::CopyIdentifier);
+  }
+  return kinds;
+}
+
 bool is_identifier_separator(uint8_t ch) {
   return ch == ':' || ch == '/' || ch == '-' || ch == '.' ||
          std::isspace(static_cast<unsigned char>(ch)) != 0;
@@ -1820,6 +1854,7 @@ FastqData rebuild_fastq(const std::vector<uint64_t> &line_offsets,
                         const std::vector<uint8_t> &identifiers,
                         const std::vector<uint8_t> &basecalls,
                         const std::vector<uint8_t> &quality_scores,
+                        const std::vector<uint8_t> &plus_line_kinds,
                         uint64_t num_records) {
   FastqData data;
   data.line_offsets = line_offsets;
@@ -1827,6 +1862,10 @@ FastqData rebuild_fastq(const std::vector<uint64_t> &line_offsets,
 
   if (line_offsets.empty()) {
     throw std::runtime_error("Decoded line-offset metadata is empty");
+  }
+  if (!plus_line_kinds.empty() &&
+      plus_line_kinds.size() != static_cast<size_t>(num_records)) {
+    throw std::runtime_error("Decoded plus-line metadata has wrong size");
   }
 
   const uint64_t file_size = line_offsets.back();
@@ -1867,9 +1906,19 @@ FastqData rebuild_fastq(const std::vector<uint64_t> &line_offsets,
       data.quality_layout = QualityLayoutKind::VariableLength;
     }
 
-    if (plus_len != 1) {
+    const uint8_t plus_kind_raw =
+        plus_line_kinds.empty() ? static_cast<uint8_t>(PlusLineKind::BarePlus)
+                                : plus_line_kinds[static_cast<size_t>(record)];
+    if (plus_kind_raw != static_cast<uint8_t>(PlusLineKind::BarePlus) &&
+        plus_kind_raw != static_cast<uint8_t>(PlusLineKind::CopyIdentifier)) {
+      throw std::runtime_error("Decoded unknown plus-line kind");
+    }
+    const PlusLineKind plus_kind = static_cast<PlusLineKind>(plus_kind_raw);
+    const uint64_t expected_plus_len =
+        plus_kind == PlusLineKind::BarePlus ? 1 : id_len + 1;
+    if (plus_len != expected_plus_len) {
       throw std::runtime_error("Decoded line-offset metadata is incompatible "
-                               "with ignored plus lines");
+                               "with plus-line reconstruction");
     }
     if (id_offset + id_len > identifiers.size() ||
         seq_offset + seq_len > basecalls.size() ||
@@ -1888,6 +1937,10 @@ FastqData rebuild_fastq(const std::vector<uint64_t> &line_offsets,
     data.raw_bytes[plus_start - 1] = '\n';
 
     data.raw_bytes[plus_start] = '+';
+    if (plus_kind == PlusLineKind::CopyIdentifier) {
+      std::memcpy(data.raw_bytes.data() + plus_start + 1,
+                  identifiers.data() + id_offset, id_len);
+    }
     data.raw_bytes[qual_start - 1] = '\n';
 
     std::memcpy(data.raw_bytes.data() + qual_start,
@@ -1967,6 +2020,7 @@ CompressedFastqData compress_fastq(const FastqData &data, size_t chunk_size,
 
   CompressedFastqData result;
   result.num_records = data.num_records;
+  result.plus_line_kinds = encode_plus_line_kinds(data);
   result.identifiers.original_size = stats.identifiers_size;
   result.quality_scores.original_size = stats.quality_scores_size;
   result.quality_codec = bsc_config.quality_codec;
@@ -2489,7 +2543,8 @@ FastqData decompress_fastq(const CompressedFastqData &compressed,
   const auto rebuild_start = Clock::now();
   auto result =
       rebuild_fastq(line_offsets, identifiers, basecalls,
-                    *quality_scores_for_rebuild, compressed.num_records);
+                    *quality_scores_for_rebuild, compressed.plus_line_kinds,
+                    compressed.num_records);
   const auto rebuild_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                               Clock::now() - rebuild_start)
                               .count();
